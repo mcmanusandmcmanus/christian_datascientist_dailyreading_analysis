@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Daily Catholic Readings • Graph Lens</title>
+  <style>
+    :root {
+      --bg: #0b1a34;
+      --card: #102445;
+      --accent: #d4af37;
+      --text: #f4f5f7;
+      --muted: #b5c7e5;
+      --danger: #c44569;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "SF Pro Text", -apple-system, sans-serif;
+      background: radial-gradient(circle at 20% 20%, rgba(212, 175, 55, 0.08), transparent 40%), var(--bg);
+      color: var(--text);
+      padding: 16px;
+    }
+    h1, h2, h3 { margin: 0 0 8px; }
+    a { color: var(--accent); }
+    .pill {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(212, 175, 55, 0.15);
+      color: var(--accent);
+      margin: 0 6px 6px 0;
+      font-size: 12px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid rgba(212, 175, 55, 0.12);
+      border-radius: 14px;
+      padding: 14px;
+      margin-bottom: 14px;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.25);
+    }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .btn {
+      padding: 10px 14px;
+      background: var(--accent);
+      border: none;
+      border-radius: 10px;
+      color: #0b1a34;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 120ms ease, box-shadow 120ms ease;
+    }
+    .btn:hover { transform: translateY(-1px); box-shadow: 0 6px 14px rgba(212, 175, 55, 0.35); }
+    .muted { color: var(--muted); font-size: 13px; }
+    img { max-width: 100%; border-radius: 12px; border: 1px solid rgba(212, 175, 55, 0.15); }
+    details { margin-bottom: 8px; }
+    .rosary { display: flex; gap: 8px; flex-wrap: wrap; }
+    .rosary .pill { background: rgba(196, 69, 105, 0.18); color: #f7d9e2; }
+    .source { font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header class="card">
+    <h1>Daily Catholic Readings</h1>
+    <div class="muted">Fr. Mike: “The New is hidden in the Old; the Old revealed in the New.”<br />Bishop Barron: let Scripture set hearts on fire.</div>
+    <div class="row" style="margin-top:10px;">
+      <button class="btn" id="refresh">Refresh daily reading</button>
+      <span class="pill" id="reading-date"></span>
+    </div>
+  </header>
+
+  <section class="card">
+    <h2>Readings</h2>
+    <div id="reading-list" class="muted">Loading...</div>
+  </section>
+
+  <section class="card">
+    <h2>Rosary Resonance</h2>
+    <div id="rosary" class="rosary"></div>
+  </section>
+
+  <section class="card">
+    <h2>Hot Words</h2>
+    <div class="muted">Top words across today’s readings.</div>
+    <img id="hotwords-img" alt="Hot words" src="../output/hotwords.png" onerror="this.style.display='none';" />
+    <div id="topwords" class="muted" style="margin-top:8px;"></div>
+  </section>
+
+  <section class="card">
+    <h2>Context Graph</h2>
+    <div class="muted">Reading ↔ word network (weights ≥ 2).</div>
+    <img id="graph-img" alt="Context graph" src="../output/context_graph.png" onerror="this.style.display='none';" />
+  </section>
+
+  <section class="card">
+    <h2>Sources & Citations</h2>
+    <div id="sources" class="muted source"></div>
+  </section>
+
+  <script>
+    async function loadPayload() {
+      const stamp = new Date().toISOString();
+      const res = await fetch(`../data/latest_payload.json?nocache=${stamp}`);
+      if (!res.ok) {
+        document.getElementById("reading-list").textContent = "Could not load readings. Run the pipeline first.";
+        return;
+      }
+      const payload = await res.json();
+      document.getElementById("reading-date").textContent = payload.date || "";
+
+      const list = document.getElementById("reading-list");
+      list.innerHTML = "";
+      payload.passages.forEach(p => {
+        const block = document.createElement("div");
+        block.innerHTML = `<details open><summary>${p.reference}</summary><div class="muted">${p.text}</div></details>`;
+        list.appendChild(block);
+      });
+
+      const rosary = document.getElementById("rosary");
+      rosary.innerHTML = "";
+      if (payload.rosary_resonance) {
+        Object.entries(payload.rosary_resonance)
+          .filter(([k]) => k !== "total_mentions")
+          .forEach(([mystery, count]) => {
+            const chip = document.createElement("span");
+            chip.className = "pill";
+            chip.textContent = `${mystery} • ${count}`;
+            rosary.appendChild(chip);
+          });
+      }
+
+      const topwords = document.getElementById("topwords");
+      if (payload.top_words) {
+        const asText = payload.top_words.slice(0, 12).map(([w, c]) => `${w} (${c})`).join(" · ");
+        topwords.textContent = asText;
+      }
+
+      const sources = document.getElementById("sources");
+      sources.innerHTML = `
+        <div>USCCB: <a href="${payload.sources.usccb_page}" target="_blank" rel="noopener">${payload.sources.usccb_page}</a></div>
+        <div>Translation ID: ${payload.sources.translation_id}</div>
+        <div>Bible API: <a href="${payload.sources.bible_api}" target="_blank" rel="noopener">${payload.sources.bible_api}</a></div>
+      `;
+    }
+
+    document.getElementById("refresh").addEventListener("click", loadPayload);
+    loadPayload();
+  </script>
+</body>
+</html>
