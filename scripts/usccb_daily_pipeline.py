@@ -28,6 +28,7 @@ import itertools
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, asdict
 from datetime import date
 from pathlib import Path
@@ -169,13 +170,38 @@ class Passage:
     text: str
 
 
+def request_with_retry(url: str, *, headers=None, params=None, timeout: int = 15, retries: int = 3, backoff: float = 1.5):
+    headers = headers or {}
+    params = params or {}
+    last_err = None
+    for attempt in range(retries):
+        try:
+            res = requests.get(url, headers=headers, params=params, timeout=timeout)
+            res.raise_for_status()
+            return res
+        except Exception as err:
+            last_err = err
+            sleep_for = backoff ** attempt
+            time.sleep(sleep_for)
+    raise last_err
+
+
 def fetch_usccb_refs(target_iso: str) -> List[str]:
     url = f"https://bible.usccb.org/daily-bible-readings?date={target_iso}"
-    res = requests.get(url, timeout=15)
-    res.raise_for_status()
+    res = request_with_retry(url, timeout=20)
     soup = BeautifulSoup(res.text, "html.parser")
     body = " ".join(el.get_text(" ", strip=True) for el in soup.select("article, section"))
     refs = re.findall(r"([1-3]?\s?[A-Za-z]+\s+\d+:\d+(?:-\d+)?(?:,\s*\d+:\d+)*)", body)
+
+    if not refs:
+        links = soup.select("a")
+        for a in links:
+            href = a.get("href", "")
+            text = a.get_text(" ", strip=True)
+            if "/bible/" in href and ":" in text:
+                refs.append(text)
+
+    refs = [" ".join(r.split()) for r in refs]
     return sorted(set(refs))
 
 
@@ -183,8 +209,7 @@ def fetch_passage_from_api(reference: str, bible_id: str, api_key: str) -> Passa
     headers = {"api-key": api_key}
     params = {"reference": reference, "content-type": "text"}
     url = f"https://api.scripture.api.bible/v1/bibles/{bible_id}/passages"
-    res = requests.get(url, headers=headers, params=params, timeout=20)
-    res.raise_for_status()
+    res = request_with_retry(url, headers=headers, params=params, timeout=20)
     data = res.json().get("data", {})
     text = BeautifulSoup(data.get("content", ""), "html.parser").get_text(" ", strip=True)
     return Passage(reference=reference, text=text)
@@ -198,6 +223,7 @@ def tokenize(txt: str) -> List[str]:
 def build_graph(passages: Dict[str, Passage]) -> Tuple[nx.Graph, collections.Counter]:
     G = nx.Graph()
     totals: collections.Counter = collections.Counter()
+    max_pairs = 500
     for ref, passage in passages.items():
         words = tokenize(passage.text)
         totals.update(words)
@@ -206,13 +232,14 @@ def build_graph(passages: Dict[str, Passage]) -> Tuple[nx.Graph, collections.Cou
         for w, c in counts.items():
             G.add_node(w, kind="word")
             G.add_edge(ref, w, weight=c)
-        for w1, w2 in itertools.combinations(words, 2):
-            if w1 == w2:
-                continue
-            if G.has_edge(w1, w2):
-                G[w1][w2]["weight"] += 1
-            else:
-                G.add_edge(w1, w2, weight=1)
+        if len(words) <= max_pairs:
+            for w1, w2 in itertools.combinations(words, 2):
+                if w1 == w2:
+                    continue
+                if G.has_edge(w1, w2):
+                    G[w1][w2]["weight"] += 1
+                else:
+                    G.add_edge(w1, w2, weight=1)
     return G, totals
 
 
@@ -275,7 +302,7 @@ def parse_reference(reference: str) -> Tuple[str, List[Tuple[int, List[int]]]]:
     """
     Returns canonical book name and list of (chapter, [verses]).
     Supports forms like "John 3:16-18, 20" and "1 Kgs 3:4-13".
-    Cross-chapter spans are not expanded; each chapter handled independently.
+    Cross-chapter spans are split into start and end chapters (best-effort).
     """
     m = re.match(r"([1-3]?\s?[A-Za-z. ]+)\s+(.+)", reference)
     if not m:
@@ -294,6 +321,14 @@ def parse_reference(reference: str) -> Tuple[str, List[Tuple[int, List[int]]]]:
             part = part.strip()
             if "-" in part:
                 start, end = part.split("-")
+                if ":" in end:
+                    end_chap_str, end_verse_str = end.split(":")
+                    end_chap = int(end_chap_str)
+                    end_verse = int(end_verse_str)
+                    start_verse = int(start)
+                    verses.extend(list(range(start_verse, start_verse + 200)))
+                    chapter_verses.append((end_chap, list(range(1, end_verse + 1))))
+                    continue
                 verses.extend(list(range(int(start), int(end) + 1)))
             else:
                 try:
@@ -314,9 +349,13 @@ def load_dr1899_csv(path: Path) -> Dict[Tuple[str, int, int], str]:
 
     if not path.exists():
         raise FileNotFoundError(f"Offline Bible not found: {path}")
+    required = {"book", "chapter", "verse", "text"}
     index: Dict[Tuple[str, int, int], str] = {}
     with path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
+        missing_cols = required.difference({c.lower() for c in reader.fieldnames or []})
+        if missing_cols:
+            raise ValueError(f"Offline CSV missing columns: {', '.join(sorted(missing_cols))}")
         for row in reader:
             book = row.get("book") or row.get("book_name") or ""
             chapter = row.get("chapter") or row.get("chapter_number") or ""
@@ -330,16 +369,19 @@ def load_dr1899_csv(path: Path) -> Dict[Tuple[str, int, int], str]:
     return index
 
 
-def fetch_passage_offline(reference: str, verse_index: Dict[Tuple[str, int, int], str]) -> Passage:
+def fetch_passage_offline(reference: str, verse_index: Dict[Tuple[str, int, int], str]) -> Tuple[Passage, int]:
     book, chap_map = parse_reference(reference)
     book_key = book.strip().lower()
     verses_out = []
+    missing = 0
     for chap, verses in chap_map:
         for v in verses:
             text = verse_index.get((book_key, chap, v))
             if text:
                 verses_out.append(f"{chap}:{v} {text}")
-    return Passage(reference=reference, text=" ".join(verses_out))
+            else:
+                missing += 1
+    return Passage(reference=reference, text=" ".join(verses_out)), missing
 
 
 def main() -> None:
@@ -376,11 +418,14 @@ def main() -> None:
 
     refs = fetch_usccb_refs(target_date)
     passages: Dict[str, Passage] = {}
+    offline_missing: Dict[str, int] = {}
 
     if args.mode == "offline":
         verse_index = load_dr1899_csv(Path(args.offline_path))
         for ref in refs:
-            passages[ref] = fetch_passage_offline(ref, verse_index=verse_index)
+            passage, missing = fetch_passage_offline(ref, verse_index=verse_index)
+            passages[ref] = passage
+            offline_missing[ref] = missing
     else:
         if not api_key or not bible_id:
             raise SystemExit("SCRIPTURE_API_KEY and BIBLE_ID must be set (env or CLI).")
@@ -406,6 +451,7 @@ def main() -> None:
             "translation_id": bible_id if args.mode == "api" else "Douay-Rheims 1899 (offline)",
             "mode": args.mode,
         },
+        "offline_missing_counts": offline_missing if args.mode == "offline" else {},
     }
     json_path = data_dir / "latest_payload.json"
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

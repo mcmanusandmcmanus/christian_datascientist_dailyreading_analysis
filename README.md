@@ -20,6 +20,7 @@ Mobile-friendly MVP to scrape USCCB daily readings, fetch Catholic translation t
 1) Download DR1899 CSV (e.g., from the scrollmapper/bible_databases repo) with columns `book,chapter,verse,text` to `data/drb_1899.csv`.
 2) Run pipeline offline:
    - `python scripts/usccb_daily_pipeline.py --mode offline --offline-path data/drb_1899.csv`
+   - The script validates CSV headers and reports any missing verses per reading in `offline_missing_counts` in `latest_payload.json`.
 
 ## Outputs
 - `data/latest_payload.json` — readings, text, top words, rosary resonance, sources.
