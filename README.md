@@ -27,6 +27,7 @@ Mobile-friendly MVP to scrape USCCB daily readings, fetch Catholic translation t
 - `output/hotwords.png` — top word frequencies.
 - `output/context_graph.png` — reading <-> word graph (edge weight >= 2).
 - `output/context_graph.gexf` — graph for Gephi/Cytoscape exploration.
+Metadata in the JSON: build time, nodes/edges, total tokens; offline mode includes missing-verse counts.
 
 ## View on mobile/desktop
 - Serve the repo root: `python -m http.server 8000`

@@ -30,7 +30,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, asdict
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -419,6 +419,8 @@ def main() -> None:
     refs = fetch_usccb_refs(target_date)
     passages: Dict[str, Passage] = {}
     offline_missing: Dict[str, int] = {}
+    total_missing = 0
+    total_requested = 0
 
     if args.mode == "offline":
         verse_index = load_dr1899_csv(Path(args.offline_path))
@@ -426,11 +428,14 @@ def main() -> None:
             passage, missing = fetch_passage_offline(ref, verse_index=verse_index)
             passages[ref] = passage
             offline_missing[ref] = missing
+            total_missing += missing
+            total_requested += len(tokenize(passage.text))
     else:
         if not api_key or not bible_id:
             raise SystemExit("SCRIPTURE_API_KEY and BIBLE_ID must be set (env or CLI).")
         for ref in refs:
             passages[ref] = fetch_passage_from_api(ref, bible_id=bible_id, api_key=api_key)
+            total_requested += len(tokenize(passages[ref].text))
 
     G, totals = build_graph(passages)
     all_tokens = []
@@ -452,6 +457,15 @@ def main() -> None:
             "mode": args.mode,
         },
         "offline_missing_counts": offline_missing if args.mode == "offline" else {},
+        "meta": {
+            "built_at": datetime.utcnow().isoformat() + "Z",
+            "nodes": G.number_of_nodes(),
+            "edges": G.number_of_edges(),
+            "total_tokens": len(all_tokens),
+            "total_refs": len(refs),
+            "total_requested_tokens": total_requested,
+            "total_missing_tokens": total_missing if args.mode == "offline" else 0,
+        },
     }
     json_path = data_dir / "latest_payload.json"
     json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
